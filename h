@@ -1,67 +1,66 @@
-**The integration works: four tests passed in about 46 seconds. There is a false positive in the first test, though.**
+**The exact-label fix is working. This run shows four tests passed in 53.42 seconds.**
 
-| Case | What the screenshots show | Assessment |
-|---|---|---|
-| Display label | Expected **“Assessment ongoing”**, generated **“Assessment”** | **Should fail.** The judge missed the mismatch. |
-| Admin permission | Covers Admin access, denied roles, blank names and preserved links | Functional coverage looks good; task file paths remain unverified. |
-| Refinement | Uses **“Assessment in progress”** and preserves `ONGOING` | Looks consistent with the request. |
-| Clarification | Asks which validation fails and what behavior is expected | Clarification check passed. |
+| Case | What I can confirm |
+|---|---|
+| Display label | Now uses **“Assessment ongoing”** and preserves `ONGOING`. |
+| Permissions | Covers Admin-only access and name validation. |
+| Refinement | Uses **“Assessment in progress”** and preserves the existing rules. |
+| Clarification | Asks useful questions about the missing behavior. |
 
-**My initial checks were too permissive for exact labels. Add this correction.**
+**One issue remains:** the Admin case invents a task to create a database migration for `initiative_templates.name`. Your supplied context never established that this column needs adding, yet **Task usefulness still scored 1.00**. The refinement also introduces an i18n requirement without supporting context.
 
-**1. In `spec_evals/test_spec_quality.py`, add this import:**
+**Next, check that the judge can reject a deliberately wrong answer.**
 
-```python
-import re
-```
-
-**2. Inside the first generation case’s existing `"expected"` dictionary, add:**
+At the **very bottom** of `spec_evals/test_spec_quality.py`, after the clarification test, add:
 
 ```python
-"required_literals": ["Assessment ongoing"],
-```
-
-Inside the refinement test’s `expected={...}` dictionary, add:
-
-```python
-"required_literals": ["Assessment in progress"],
-```
-
-**3. In `assess()`, immediately after the existing `checks = {...}` block, add:**
-
-```python
-then_text = "\n".join(
-    criterion.then
-    for criterion in spec.acceptance_criteria
-)
-
-for literal in expected.get("required_literals", []):
-    check_name = f"required_literal_present:{literal}"
-
-    checks[check_name] = (
-        re.search(
-            r"(?<!\w)" + re.escape(literal) + r"(?!\w)",
-            then_text,
-        )
-        is not None
+def test_judge_rejects_wrong_permission(judge):
+    test_case = LLMTestCase(
+        input=(
+            "Only Admin may rename an initiative template. "
+            "Initiative Owner and Initiative Assessor must be denied."
+        ),
+        expected_output=(
+            "Admin can rename. Initiative Owner and Initiative "
+            "Assessor cannot rename."
+        ),
+        actual_output=(
+            "Acceptance criterion: Given an Initiative Owner, "
+            "when they rename a template, then the new name is saved. "
+            "Both Admin and Initiative Owner may rename templates."
+        ),
     )
 
-    status = "PASS" if checks[check_name] else "FAIL"
-    print(f"{status} — required exact value: {literal!r}")
+    metric = build_metric(
+        name="Permission negative control",
+        instructions=(
+            "Compare actual_output with input and expected_output. "
+            "Check every forbidden permission. "
+            "Granting rename access to an explicitly denied role "
+            "is a critical violation and must receive score 0."
+        ),
+        judge=judge,
+        critical=True,
+    )
+
+    metric.measure(test_case)
+
+    print(f"\nJudge score: {metric.score}")
+    print(metric.reason)
+
+    assert metric.score == 0.0, (
+        "The judge accepted a deliberately incorrect permission."
+    )
 ```
 
-Your existing failure collection will automatically pick up this check. **An output containing only “Assessment” will now fail**, regardless of the judge’s score.
+Run only this new test:
 
-**4. In `build_metric()`, replace the instruction starting with `"Evaluate semantic behavior, not identical wording"` with:**
-
-```python
-(
-    "Allow different explanatory wording. "
-    "Required literal UI labels and identifiers must retain their exact values "
-    "from input and expected_output. "
-    "Do not accept a shortened or changed label as equivalent. "
-    "Explain specific omissions or contradictions in actual_output."
-),
+```bash
+RUN_LLM_EVALS=1 \
+EVAL_JUDGE_MODEL=mistral-small-2603 \
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+python -m pytest spec_evals/test_spec_quality.py \
+  -k judge_rejects_wrong_permission -v -s
 ```
 
-Rerun the same command. This catches the observed missing label; the judge still needs to check that the label is used correctly and consistently.
+**Expected: the test passes because the judge gives the bad answer `0.0`.** This starts checking the evaluator’s reliability before trusting its scores on more FLOWR tickets.
